@@ -7,6 +7,8 @@ from scipy.misc import imread, imresize
 from tqdm import tqdm
 from collections import Counter
 from random import seed, choice, sample
+from nltk.translate.bleu_score import corpus_bleu
+from nltk.translate.meteor_score import  meteor_score
 
 
 def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_image, min_word_freq, output_folder,
@@ -284,3 +286,35 @@ def accuracy(scores, targets, k):
     correct = ind.eq(targets.view(-1, 1).expand_as(ind))
     correct_total = correct.view(-1).float().sum()  # 0D tensor
     return correct_total.item() * (100.0 / (targets.size(0)*targets.size(1)) )
+
+def intlist2strlist(intlist):
+    return [str(val) for val in intlist]
+
+def corpus_meteor(list_of_refs,list_of_hypos):
+    # the original input format of Meteor metric is different form BLEU series
+    # in this function, we change the format of BLEU to fit Meteor
+    Meteor = 0.0
+
+    for i,ref in enumerate(list_of_refs):
+        ref_list_tmp = [' '.join(intlist2strlist(val)) for val in ref]
+        hypo_tmp = ' '.join(intlist2strlist(list_of_hypos[i]))
+        Meteor += meteor_score(ref_list_tmp,hypo_tmp)
+
+    return Meteor / (len(list_of_hypos))
+
+
+def get_metrics_scores(references, hypotheses):
+    '''
+    :param references: references = [[ref1a, ref1b, ref1c], [ref2a, ref2b], ...]
+    :param hypotheses: hypotheses = [hyp1, hyp2, ...]
+    :return: the scores using five different metrics
+    '''
+
+    bleu1 = corpus_bleu(references, hypotheses, weights=(1, 0, 0, 0))
+    bleu2 = corpus_bleu(references, hypotheses, weights=(0.5, 0.5, 0, 0))
+    bleu3 = corpus_bleu(references, hypotheses, weights=(0.33, 0.33, 0.33, 0))
+    bleu4 = corpus_bleu(references, hypotheses, weights=(0.25, 0.25, 0.25, 0.25))
+
+    Meteor = corpus_meteor(references, hypotheses)
+
+    return (bleu1, bleu2, bleu3, bleu4, Meteor)

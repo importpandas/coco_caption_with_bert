@@ -4,48 +4,53 @@ import torch.utils.data
 import torchvision.transforms as transforms
 from datasets import *
 from utils import *
-from nltk.translate.bleu_score import corpus_bleu
 import torch.nn.functional as F
 from tqdm import tqdm
-
-# Parameters
-data_folder = '/media/ssd/caption data'  # folder with data files saved by create_input_files.py
-data_name = 'coco_5_cap_per_img_5_min_word_freq'  # base name shared by data files
-checkpoint = '../BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar'  # model checkpoint
-word_map_file = '/media/ssd/caption data/WORDMAP_coco_5_cap_per_img_5_min_word_freq.json'  # word map, ensure it's the same the data was encoded with and the model was trained with
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # sets device for model and PyTorch tensors
-cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
-
-# Load model
-checkpoint = torch.load(checkpoint)
-decoder = checkpoint['decoder']
-decoder = decoder.to(device)
-decoder.eval()
-encoder = checkpoint['encoder']
-encoder = encoder.to(device)
-encoder.eval()
-
-# Load word map (word2ix)
-with open(word_map_file, 'r') as j:
-    word_map = json.load(j)
-rev_word_map = {v: k for k, v in word_map.items()}
-vocab_size = len(word_map)
-
-# Normalization transform
-normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                 std=[0.229, 0.224, 0.225])
+import argparse
 
 
-def evaluate(beam_size):
-    """
-    Evaluation
+def evaluate():
 
-    :param beam_size: beam size at which to generate captions for evaluation
-    :return: BLEU-4 score
-    """
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_folder", default='data/', type=str,
+                        help="folder with data files saved by create_input_files.py")
+    parser.add_argument("--data_name", default='coco_5_cap_per_img_5_min_word_freq', type=str,
+                        help="base name shared by data files")
+    parser.add_argument("--checkpoint", default='pretrained/BEST_checkpoint_coco_5_cap_per_img_5_min_word_freq.pth.tar',
+                        type=str,
+                        help="path to load checkpoint")
+    parser.add_argument("--word_map_file", default='data/WORDMAP_coco_5_cap_per_img_5_min_word_freq.json', type=str,
+                        help="word map, ensure it's the same the data was encoded with and the model was trained with")
+    parser.add_argument("--beam_size", default=1, type=int,
+                        help="beam size at which to generate captions for evaluation")
+    args = parser.parse_args()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # sets device for model and PyTorch tensors
+    cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
+
+    # Load model
+    checkpoint = torch.load(args.checkpoint)
+    decoder = checkpoint['decoder']
+    decoder = decoder.to(device)
+    decoder.eval()
+    encoder = checkpoint['encoder']
+    encoder = encoder.to(device)
+    encoder.eval()
+
+    # Load word map (word2ix)
+    with open(args.word_map_file, 'r') as j:
+        word_map = json.load(j)
+    rev_word_map = {v: k for k, v in word_map.items()}
+    vocab_size = len(word_map)
+
+    # Normalization transform
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+
+
     # DataLoader
     loader = torch.utils.data.DataLoader(
-        CaptionDataset(data_folder, data_name, 'TEST', transform=transforms.Compose([normalize])),
+        CaptionDataset(args.data_folder, args.data_name, 'TEST', transform=transforms.Compose([normalize])),
         batch_size=1, shuffle=True, num_workers=1, pin_memory=True)
 
     # TODO: Batched Beam Search
@@ -59,9 +64,9 @@ def evaluate(beam_size):
 
     # For each image
     for i, (image, caps, caplens, allcaps) in enumerate(
-            tqdm(loader, desc="EVALUATING AT BEAM SIZE " + str(beam_size))):
+            tqdm(loader, desc="EVALUATING AT BEAM SIZE " + str(args.beam_size))):
 
-        k = beam_size
+        k = args.beam_size
 
         # Move to GPU device, if available
         image = image.to(device)  # (1, 3, 256, 256)
@@ -168,12 +173,11 @@ def evaluate(beam_size):
 
         assert len(references) == len(hypotheses)
 
-    # Calculate BLEU-4 scores
-    bleu4 = corpus_bleu(references, hypotheses)
-
-    return bleu4
+    # the type of the return is a tuple consist of five elements
+    return get_metrics_scores(references,hypotheses)
 
 
 if __name__ == '__main__':
-    beam_size = 1
-    print("\nBLEU-4 score @ beam size of %d is %.4f." % (beam_size, evaluate(beam_size)))
+    bleu1, bleu2, bleu3, bleu4, Meteor = evaluate()
+    print('BLEU_1:{:.4F} BLEU_2:{:.4F} BLEU_3:{:.4F} BLEU_4:{:.4F} Meteor:{:.4f}'.format(
+        bleu1, bleu2, bleu3, bleu4, Meteor))

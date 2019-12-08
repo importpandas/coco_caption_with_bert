@@ -337,14 +337,18 @@ def validate(val_loader, encoder, decoder, criterion, word_map,args):
 
             assert len(references) == len(hypotheses)
 
-        # Calculate BLEU-4 scores
-        bleu4 = corpus_bleu(references, hypotheses)
+        # Calculate scores using different metric
+        bleu1, bleu2, bleu3, bleu4, Meteor = get_metrics_scores(references,hypotheses)
 
         print(
-            '\n * LOSS - {loss.avg:.3f}, TOP-5 ACCURACY - {top5.avg:.3f}, BLEU-4 - {bleu}\n'.format(
+            '\n * LOSS - {loss.avg:.3f}, TOP-5 ACCURACY - {top5.avg:.3f}, BLEU-1 - {bleu1}, BLEU-2 - {bleu2}, BLEU-3 - {bleu3}, BLEU-4 - {bleu4}, Meteor - {Meteor}\n'.format(
                 loss=losses,
                 top5=top5accs,
-                bleu=bleu4))
+                bleu1=bleu1,
+                bleu2=bleu2,
+                bleu3=bleu3,
+                bleu4=bleu4,
+                Meteor=Meteor))
 
     return bleu4
 
