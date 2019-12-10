@@ -10,6 +10,8 @@ from datasets import *
 from utils import *
 from nltk.translate.bleu_score import corpus_bleu
 import argparse
+from transformers import (WEIGHTS_NAME, BertConfig,
+                          BertModel, BertTokenizer)
 
 
 cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
@@ -20,12 +22,14 @@ def main():
     Training and validation.
     """
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_folder", default='data/', type=str,
+    parser.add_argument("--data_folder", default='data/', type=str, required=True,
                         help="folder with data files saved by create_input_files.py")
+    parser.add_argument("--output_dir", default='saved_models/', type=str, required=True,
+                        help="path to save checkpoints")
+    parser.add_argument("--model_name_or_path", default=None, type=str, required=True,
+                        help="Path to pre-trained model or shortcut name")
     parser.add_argument("--data_name", default='coco_5_cap_per_img_5_min_word_freq', type=str,
                         help="base name shared by data files")
-    parser.add_argument("--output_dir", default='saved_models/', type=str,
-                        help="path to save checkpoints")
     parser.add_argument("--checkpoint", default=None, type=str,
                         help="path to checkpoint")
     parser.add_argument("--emb_dim", default=512, type=int,
@@ -60,15 +64,19 @@ def main():
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     args.device = device
-
     best_bleu4 = 0
-
     epochs_since_improvement = 0
 
     # Read word map
     word_map_file = os.path.join(args.data_folder, 'WORDMAP_' + args.data_name + '.json')
     with open(word_map_file, 'r') as j:
         word_map = json.load(j)
+
+    config = BertConfig.from_pretrained(args.model_name_or_path)
+    bert_model = BertModel.from_pretrained(args.model_name_or_path,
+                                        from_tf=bool('.ckpt' in args.model_name_or_path),
+                                        config=config)
+
 
     # Initialize / load checkpoint
     if args.checkpoint is None:
@@ -101,6 +109,7 @@ def main():
     # Move to GPU, if available
     decoder = decoder.to(args.device)
     encoder = encoder.to(args.device)
+    bert_model = bert_model.to(args.device)
 
     # Loss function
     criterion = nn.CrossEntropyLoss(ignore_index=0).to(args.device)
@@ -131,6 +140,7 @@ def main():
         # One epoch's training
         train(train_loader=train_loader,
               encoder=encoder,
+              bert_encoder=bert_model,
               decoder=decoder,
               criterion=criterion,
               encoder_optimizer=encoder_optimizer,
@@ -160,7 +170,7 @@ def main():
                         decoder_optimizer, recent_bleu4, is_best)
 
 
-def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, args):
+def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, args):
     """
     Performs one epoch's training.
 
@@ -184,7 +194,7 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
     start = time.time()
 
     # Batches
-    for i, (imgs, caps, caplens) in enumerate(train_loader):
+    for i, (imgs, caps, caplens, caps_bert, caplens_bert) in enumerate(train_loader):
         data_time.update(time.time() - start)
 
         # Move to GPU, if available
