@@ -1,9 +1,12 @@
 from utils import create_input_files
 import argparse
+from transformers import BertTokenizer
 
 if __name__ == '__main__':
     # Create input files (along with word map)
     parser = argparse.ArgumentParser()
+    parser.add_argument("--vocab_path", default="", type=str,
+                        help="Path to bert vocabulary")
     parser.add_argument("--dataset", default='coco', type=str,
                         help="caption datasets type,i.e.,'coco', 'flickr8k', 'flickr30k' ")
     parser.add_argument("--karpathy_json_path", default='data/dataset_coco.json', type=str,required=True,
@@ -17,10 +20,17 @@ if __name__ == '__main__':
     parser.add_argument("--max_len", default=50, type=int)
     args = parser.parse_args()
 
+    if args.vocab_path:
+        tokenizer = BertTokenizer.from_pretrained(args.vocab_path)
+        print("processing data with bert format")
+    else:
+        tokenizer = None
+
     create_input_files(dataset=args.dataset,
                        karpathy_json_path=args.karpathy_json_path,
                        image_folder=args.image_folder,
                        captions_per_image=args.captions_per_image,
                        min_word_freq=args.min_word_freq,
                        output_folder=args.output_folder,
+                       tokenizer=tokenizer,
                        max_len=args.max_len)

@@ -6,13 +6,14 @@ import torch
 from scipy.misc import imread, imresize
 from tqdm import tqdm
 from collections import Counter
+import random
 from random import seed, choice, sample
 from nltk.translate.bleu_score import corpus_bleu
 from nltk.translate.meteor_score import  meteor_score
 
 
 def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_image, min_word_freq, output_folder,
-                       max_len=100):
+                       tokenizer=None,max_len=100):
     """
     Creates input files for training, validation, and test data.
 
@@ -34,19 +35,27 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
     # Read image paths and captions for each image
     train_image_paths = []
     train_image_captions = []
+    train_image_captions_bert = []
     val_image_paths = []
     val_image_captions = []
+    val_image_captions_bert = []
     test_image_paths = []
     test_image_captions = []
+    test_image_captions_bert = []
     word_freq = Counter()
 
     for img in data['images']:
         captions = []
+        bert_captions = []
         for c in img['sentences']:
             # Update word frequency
             word_freq.update(c['tokens'])
             if len(c['tokens']) <= max_len:
                 captions.append(c['tokens'])
+                if tokenizer is not None:
+                    bert_caption_tokens = tokenizer.tokenize(c['raw'])
+                    bert_captions.append(bert_caption_tokens)
+
 
         if len(captions) == 0:
             continue
@@ -57,12 +66,18 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
         if img['split'] in {'train', 'restval'}:
             train_image_paths.append(path)
             train_image_captions.append(captions)
+            if tokenizer is not None:
+                train_image_captions_bert.append(bert_captions)
         elif img['split'] in {'val'}:
             val_image_paths.append(path)
             val_image_captions.append(captions)
+            if tokenizer is not None:
+                val_image_captions_bert.append(bert_captions)
         elif img['split'] in {'test'}:
             test_image_paths.append(path)
             test_image_captions.append(captions)
+            if tokenizer is not None:
+                test_image_captions_bert.append(bert_captions)
 
     # Sanity check
     assert len(train_image_paths) == len(train_image_captions)
@@ -86,9 +101,9 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
 
     # Sample captions for each image, save images to HDF5 file, and captions and their lengths to JSON files
     seed(123)
-    for impaths, imcaps, split in [(train_image_paths, train_image_captions, 'TRAIN'),
-                                   (val_image_paths, val_image_captions, 'VAL'),
-                                   (test_image_paths, test_image_captions, 'TEST')]:
+    for impaths, imcaps, imcaps_bert, split in [(train_image_paths, train_image_captions, train_image_captions_bert, 'TRAIN'),
+                                   (val_image_paths, val_image_captions, val_image_captions_bert, 'VAL'),
+                                   (test_image_paths, test_image_captions, test_image_captions_bert, 'TEST')]:
 
         with h5py.File(os.path.join(output_folder, split + '_IMAGES_' + base_filename + '.hdf5'), 'a') as h:
             # Make a note of the number of captions we are sampling per image
@@ -102,16 +117,24 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
             enc_captions = []
             caplens = []
 
+            enc_captions_bert = []
+            caplens_bert = []
+
             for i, path in enumerate(tqdm(impaths)):
 
                 # Sample captions
                 if len(imcaps[i]) < captions_per_image:
-                    captions = imcaps[i] + [choice(imcaps[i]) for _ in range(captions_per_image - len(imcaps[i]))]
+                    random_choices = [random.randrange(0,len(imcaps[i])) for _ in range(captions_per_image - len(imcaps[i]))]
+                    captions = imcaps[i] + [imcaps[i][j]  for j in random_choices]
+                    captions_bert = imcaps_bert[i] + [imcaps_bert[i][j] for j in random_choices]
                 else:
-                    captions = sample(imcaps[i], k=captions_per_image)
+                    random_samples = random.sample(list(range(len(imcaps[i]))), k=captions_per_image)
+                    captions = [imcaps[i][j] for j in random_samples]
+                    captions_bert = [imcaps_bert[i][j] for j in random_samples]
 
                 # Sanity check
                 assert len(captions) == captions_per_image
+                assert len(captions_bert) == captions_per_image
 
                 # Read images
                 img = imread(impaths[i])
@@ -137,8 +160,22 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
                     enc_captions.append(enc_c)
                     caplens.append(c_len)
 
+                if tokenizer is not None:
+                    for j, c in enumerate(captions_bert):
+                        if len(c) > max_len:
+                            c = c[0:max_len]
+                        tokens = []
+                        tokens.append("[CLS]")
+                        tokens += c
+                        tokens.append("[SEP]")
+                        enc_c_bert = tokenizer.convert_tokens_to_ids(tokens) + (max_len - len(c)) * [0]
+
+                        enc_captions_bert.append(enc_c_bert)
+                        caplens_bert.append(len(tokens))
+
             # Sanity check
             assert images.shape[0] * captions_per_image == len(enc_captions) == len(caplens)
+            assert images.shape[0] * captions_per_image == len(enc_captions_bert) == len(caplens_bert)
 
             # Save encoded captions and their lengths to JSON files
             with open(os.path.join(output_folder, split + '_CAPTIONS_' + base_filename + '.json'), 'w') as j:
@@ -146,6 +183,13 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
 
             with open(os.path.join(output_folder, split + '_CAPLENS_' + base_filename + '.json'), 'w') as j:
                 json.dump(caplens, j)
+
+            if tokenizer is not None:
+                with open(os.path.join(output_folder, split + '_CAPTIONS_BERT_' + base_filename + '.json'), 'w') as j:
+                    json.dump(enc_captions_bert, j)
+
+                with open(os.path.join(output_folder, split + '_CAPLENS_BERT_' + base_filename + '.json'), 'w') as j:
+                    json.dump(caplens_bert, j)
 
 
 def init_embedding(embeddings):
