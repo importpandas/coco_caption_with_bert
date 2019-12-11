@@ -1,4 +1,5 @@
 import time
+import sys
 import torch
 import torch.backends.cudnn as cudnn
 import torch.optim
@@ -187,8 +188,9 @@ def main():
             epochs_since_improvement = 0
 
         # Save checkpoint
-        save_checkpoint(args.data_name, args.output_dir,epoch, epochs_since_improvement, encoder, decoder, encoder_optimizer,
-                        decoder_optimizer, recent_bleu4, is_best)
+        if is_best:
+            save_checkpoint(args.data_name, args.output_dir,epoch, epochs_since_improvement, encoder, decoder, bert_model, encoder_optimizer,
+                            decoder_optimizer, bert_optimizer, recent_bleu4)
 
 
 def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, bert_optimizer, epoch, args):
@@ -224,7 +226,6 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
         data_time.update(time.time() - start)
 
         # Move to GPU, if available
-        print(args.device)
         imgs = imgs.to(args.device)
         caps = caps.to(args.device)
         caplens = caplens.to(args.device)
@@ -288,6 +289,7 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
                                                                           batch_time=batch_time,
                                                                           data_time=data_time, loss=losses,
                                                                           top5=top5accs))
+        sys.stdout.flush()
 
 
 def validate(val_loader, encoder, bert_encoder, decoder, criterion, word_map,args):
