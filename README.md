@@ -5,4 +5,4 @@ This model combines attention-based model proposed in [Show, Attend, and Tell](h
 
 ## Requirements:
 
-pytorch 1.3.1, python3.6
+pytorch 1.3.1, python3.6, **nltk3.4.5**

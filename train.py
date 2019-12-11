@@ -1,17 +1,17 @@
 import time
+import torch
 import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence
-from models import Encoder, DecoderWithAttention
+from models import Encoder, ModifiedDecoderWithAttention
 from datasets import *
 from utils import *
 from nltk.translate.bleu_score import corpus_bleu
 import argparse
-from transformers import (WEIGHTS_NAME, BertConfig,
-                          BertModel, BertTokenizer)
+from transformers import WEIGHTS_NAME, BertConfig,BertModel, BertTokenizer, AdamW
 
 
 cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
@@ -43,10 +43,11 @@ def main():
     parser.add_argument("--start_epoch", default=0, type=int)
     parser.add_argument("--epochs", default=120, type=int,
                         help="number of epochs to train for (if early stopping is not triggered)")
-    parser.add_argument("--batch_size", default=128, type=int,
+    parser.add_argument("--batch_size", default=32, type=int,
                         help="batch size for training and testing")
     parser.add_argument("--workers", default=8, type=int,
                         help="num of workers for data-loading")
+    parser.add_argument("--bert_lr", default=5e-5, type=float)
     parser.add_argument("--encoder_lr", default=1e-4, type=float)
     parser.add_argument("--decoder_lr", default=5e-4, type=float)
     parser.add_argument("--grad_clip", default=5, type=float,
@@ -57,6 +58,14 @@ def main():
                         help="print training/validation stats every __ batches")
     parser.add_argument("--fine_tune_encoder", action='store_true',
                         help="Whether to finetune the encoder")
+    parser.add_argument("--bert_dim", default=768, type=int,
+                        help="the hidden size of bert model, 768 for bert base, 1024 for bert large")
+    parser.add_argument("--add_bert_to_input", action='store_true',
+                        help="Whether to add bert hidden to the input of decoder lstm")
+    parser.add_argument("--add_bert_to_init_hidden", action='store_true',
+                        help="Whether to use bert hidden to initialize the h0 and c0 of lstm")
+    parser.add_argument("--weight_decay", default=0.0, type=float,
+                        help="Weight decay if we apply some.")
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
@@ -80,11 +89,14 @@ def main():
 
     # Initialize / load checkpoint
     if args.checkpoint is None:
-        decoder = DecoderWithAttention(attention_dim=args.attention_dim,
+        decoder = ModifiedDecoderWithAttention(attention_dim=args.attention_dim,
                                        embed_dim=args.emb_dim,
+                                       bert_dim=args.bert_dim,
                                        decoder_dim=args.decoder_dim,
                                        vocab_size=len(word_map),
-                                       dropout=args.dropout)
+                                       dropout=args.dropout,
+                                       add_bert_to_input=args.add_bert_to_input,
+                                       add_bert_to_init_hidden=args.add_bert_to_init_hidden)
         decoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, decoder.parameters()),
                                              lr=args.decoder_lr)
         encoder = Encoder()
@@ -110,6 +122,13 @@ def main():
     decoder = decoder.to(args.device)
     encoder = encoder.to(args.device)
     bert_model = bert_model.to(args.device)
+
+    no_decay = ['bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in bert_model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
+        {'params': [p for n, p in bert_model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        ]
+    bert_optimizer = AdamW(optimizer_grouped_parameters, lr=args.bert_lr, eps=1e-8)
 
     # Loss function
     criterion = nn.CrossEntropyLoss(ignore_index=0).to(args.device)
@@ -145,12 +164,14 @@ def main():
               criterion=criterion,
               encoder_optimizer=encoder_optimizer,
               decoder_optimizer=decoder_optimizer,
+              bert_optimizer=bert_optimizer,
               epoch=epoch,
               args=args)
 
         # One epoch's validation
         recent_bleu4 = validate(val_loader=val_loader,
                                 encoder=encoder,
+                                bert_encoder=bert_model,
                                 decoder=decoder,
                                 criterion=criterion,
                                 word_map=word_map,
@@ -170,7 +191,7 @@ def main():
                         decoder_optimizer, recent_bleu4, is_best)
 
 
-def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch, args):
+def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, bert_optimizer, epoch, args):
     """
     Performs one epoch's training.
 
@@ -185,6 +206,11 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
 
     decoder.train()  # train mode (dropout and batchnorm is used)
     encoder.train()
+    bert_encoder.train()
+
+    decoder.zero_grad()
+    encoder.zero_grad()
+    bert_encoder.zero_grad()
 
     batch_time = AverageMeter()  # forward prop. + back prop. time
     data_time = AverageMeter()  # data loading time
@@ -198,13 +224,20 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
         data_time.update(time.time() - start)
 
         # Move to GPU, if available
+        print(args.device)
         imgs = imgs.to(args.device)
         caps = caps.to(args.device)
         caplens = caplens.to(args.device)
+        caps_bert = caps_bert.to(args.device)
+
+        #generate attention mask for bert input
+        caplens_bert = caplens_bert.squeeze(-1).to(args.device)
+        attention_mask = (torch.arange(len(caps_bert[0]))[None, :] < caplens_bert[:, None]).squeeze(1).float().to(args.device)
 
         # Forward prop.
+        bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)
         imgs = encoder(imgs)
-        scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, caps, caplens)
+        scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs,bert_output, caps, caplens)
 
         # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
         targets = caps_sorted[:, 1:]
@@ -218,9 +251,6 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
         loss += args.alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
 
         # Back prop.
-        decoder_optimizer.zero_grad()
-        if encoder_optimizer is not None:
-            encoder_optimizer.zero_grad()
         loss.backward()
 
         # Clip gradients
@@ -228,11 +258,17 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
             clip_gradient(decoder_optimizer, args.grad_clip)
             if encoder_optimizer is not None:
                 clip_gradient(encoder_optimizer, args.grad_clip)
+            if bert_optimizer is not None:
+                clip_gradient(bert_optimizer, args.grad_clip)
 
         # Update weights
         decoder_optimizer.step()
-        if encoder_optimizer is not None:
-            encoder_optimizer.step()
+        encoder_optimizer.step()
+        bert_optimizer.step()
+
+        decoder_optimizer.zero_grad()
+        encoder_optimizer.zero_grad()
+        bert_optimizer.zero_grad()
 
         # Keep track of metrics
         top5 = accuracy(scores, targets, 5)
@@ -254,12 +290,13 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
                                                                           top5=top5accs))
 
 
-def validate(val_loader, encoder, decoder, criterion, word_map,args):
+def validate(val_loader, encoder, bert_encoder, decoder, criterion, word_map,args):
     """
     Performs one epoch's validation.
 
     :param val_loader: DataLoader for validation data.
     :param encoder: encoder model
+    :param bert_encoder: encoder model with bert surpervising
     :param decoder: decoder model
     :param criterion: loss layer
     :return: BLEU-4 score
@@ -267,6 +304,8 @@ def validate(val_loader, encoder, decoder, criterion, word_map,args):
     decoder.eval()  # eval mode (no dropout or batchnorm)
     if encoder is not None:
         encoder.eval()
+    if bert_encoder is not None:
+        bert_encoder.eval()
 
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -281,17 +320,24 @@ def validate(val_loader, encoder, decoder, criterion, word_map,args):
     # solves the issue #57
     with torch.no_grad():
         # Batches
-        for i, (imgs, caps, caplens, allcaps) in enumerate(val_loader):
+        for i, (imgs, caps, caplens, caps_bert, caplens_bert, allcaps) in enumerate(val_loader):
 
             # Move to device, if available
             imgs = imgs.to(args.device)
             caps = caps.to(args.device)
             caplens = caplens.to(args.device)
+            caps_bert = caps_bert.to(args.device)
+
+            # generate attention mask for bert input
+            caplens_bert = caplens_bert.squeeze(-1).to(args.device)
+            attention_mask = (torch.arange(len(caps_bert[0]))[None, :] < caplens_bert[:, None]).squeeze(1).float().to(
+                args.device)
 
             # Forward prop.
-            if encoder is not None:
-                imgs = encoder(imgs)
-            scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, caps, caplens)
+            bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)
+            imgs = encoder(imgs)
+
+            scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs,bert_output, caps, caplens)
 
             # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
             targets = caps_sorted[:, 1:]
