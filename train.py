@@ -12,7 +12,8 @@ from utils import *
 from nltk.translate.bleu_score import corpus_bleu
 import argparse
 from transformers import WEIGHTS_NAME, BertConfig,BertModel, BertTokenizer, AdamW
-
+import os 
+os.environ['TORCH_HOME'] = "/mnt/lustre/sjtu/home/hsx66/.torch/models"
 
 cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
 
@@ -231,13 +232,13 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
         caps_bert = caps_bert.to(args.device)
 
         #generate attention mask for bert input
-        caplens_bert = caplens_bert.squeeze(-1).to(args.device)
+        caplens_bert = caplens_bert.squeeze(-1)
         attention_mask = (torch.arange(len(caps_bert[0]))[None, :] < caplens_bert[:, None]).squeeze(1).float().to(args.device)
 
         # Forward prop.
-        bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)
+        bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)[1]
         imgs = encoder(imgs)
-        scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs,bert_output, caps, caplens)
+        scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, bert_output, caps, caplens)
 
         # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
         targets = caps_sorted[:, 1:]
@@ -334,7 +335,7 @@ def validate(val_loader, encoder, bert_encoder, decoder, criterion, word_map,arg
                 args.device)
 
             # Forward prop.
-            bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)
+            bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)[1]
             imgs = encoder(imgs)
 
             scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs,bert_output, caps, caplens)

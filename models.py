@@ -251,11 +251,11 @@ class ModifiedDecoderWithAttention(nn.Module):
         if self.add_bert_to_init_hidden:
             self.init_h = nn.Linear(encoder_dim + bert_dim, decoder_dim)  # linear layer to find initial hidden state of LSTMCell
             self.init_c = nn.Linear(encoder_dim + bert_dim, decoder_dim)  # linear layer to find initial cell state of LSTMCell
-            self.f_beta = nn.Linear(decoder_dim + bert_dim, encoder_dim)  # linear layer to create a sigmoid-activated gate
         else:
             self.init_h = nn.Linear(encoder_dim, decoder_dim)  # linear layer to find initial hidden state of LSTMCell
             self.init_c = nn.Linear(encoder_dim, decoder_dim)  # linear layer to find initial cell state of LSTMCell
-            self.f_beta = nn.Linear(decoder_dim, encoder_dim)  # linear layer to create a sigmoid-activated gate
+        
+        self.f_beta = nn.Linear(decoder_dim, encoder_dim)  # linear layer to create a sigmoid-activated gate
         self.sigmoid = nn.Sigmoid()
         self.fc = nn.Linear(decoder_dim, vocab_size)  # linear layer to find scores over vocabulary
         self.init_weights()  # initialize some layers with the uniform distribution
@@ -322,7 +322,7 @@ class ModifiedDecoderWithAttention(nn.Module):
         # Sort input data by decreasing lengths; why? apparent below
         caption_lengths, sort_ind = caption_lengths.squeeze(1).sort(dim=0, descending=True)
         encoder_out = encoder_out[sort_ind]
-        bert_encoder_out = encoder_out[sort_ind]
+        bert_encoder_out = bert_encoder_out[sort_ind]
         encoded_captions = encoded_captions[sort_ind]
         max_caption_len = max(caption_lengths.tolist())
 
@@ -354,7 +354,7 @@ class ModifiedDecoderWithAttention(nn.Module):
             attention_weighted_encoding = gate * attention_weighted_encoding
             if self.add_bert_to_input:
                 h, c = self.decode_step(
-                    torch.cat([embeddings[:batch_size_t, t, :], attention_weighted_encoding, bert_encoder_out], dim=1),
+                        torch.cat([embeddings[:batch_size_t, t, :], attention_weighted_encoding, bert_encoder_out[:batch_size_t]], dim=1),
                     (h[:batch_size_t], c[:batch_size_t]))  # (batch_size_t, decoder_dim)
             else:
                 h, c = self.decode_step(
