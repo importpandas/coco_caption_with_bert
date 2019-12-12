@@ -332,9 +332,8 @@ def validate(val_loader, encoder, bert_encoder, decoder, criterion, word_map,arg
             caps_bert = caps_bert.to(args.device)
 
             # generate attention mask for bert input
-            caplens_bert = caplens_bert.squeeze(-1).to(args.device)
-            attention_mask = (torch.arange(len(caps_bert[0]))[None, :] < caplens_bert[:, None]).squeeze(1).float().to(
-                args.device)
+            caplens_bert = caplens_bert.squeeze(-1)
+            attention_mask = (torch.arange(len(caps_bert[0]))[None, :] < caplens_bert[:, None]).squeeze(1).float().to(args.device)
 
             # Forward prop.
             bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)[1]
