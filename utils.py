@@ -271,14 +271,17 @@ def save_checkpoint(data_name, output_dir,epoch, epochs_since_improvement, encod
              'bleu-4': bleu4,
              'encoder': encoder,
              'decoder': decoder,
-             'bert_encoder':bert_encoder,
              'encoder_optimizer': encoder_optimizer,
              'decoder_optimizer': decoder_optimizer,
              'bert_optimizer': bert_optimizer}
     filename = 'checkpoint_'+ str(bleu4) + '_'+ data_name + '.pth.tar'
+
+    output_dir = os.path.join(output_dir, f'epoch_{epoch}_bleu4_{bleu4:.4f}')
     saved_path = os.path.join(output_dir, filename)
-    # If this checkpoint is the best so far, store a copy so it doesn't get overwritten by a worse checkpoint
     torch.save(state, saved_path)
+
+    model_to_save = bert_encoder.module if hasattr(bert_encoder, 'module') else bert_encoder  # Take care of distributed/parallel training
+    model_to_save.save_pretrained(output_dir)
 
 
 class AverageMeter(object):
