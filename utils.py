@@ -277,6 +277,8 @@ def save_checkpoint(data_name, output_dir,epoch, epochs_since_improvement, encod
     filename = 'checkpoint_'+ str(bleu4) + '_'+ data_name + '.pth.tar'
 
     output_dir = os.path.join(output_dir, f'epoch_{epoch}_bleu4_{bleu4:.4f}')
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     saved_path = os.path.join(output_dir, filename)
     torch.save(state, saved_path)
 

@@ -1,20 +1,21 @@
 import time
 import sys
 import torch
+import torchvision
 import torch.backends.cudnn as cudnn
 import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 from torch import nn
 from torch.nn.utils.rnn import pack_padded_sequence
-from models import Encoder, ModifiedDecoderWithAttention
+from models import Encoder, BertEncoder, ModifiedDecoderWithAttention
 from datasets import *
 from utils import *
 from nltk.translate.bleu_score import corpus_bleu
 import argparse
 from transformers import WEIGHTS_NAME, BertConfig,BertModel, BertTokenizer, AdamW
-import os 
-os.environ['TORCH_HOME'] = "/mnt/lustre/sjtu/home/hsx66/.torch/models"
+import os
+#os.environ['TORCH_HOME'] = "/mnt/lustre/sjtu/home/hsx66/.torch/models"
 
 cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
 
@@ -68,6 +69,10 @@ def main():
                         help="Whether to use bert hidden to initialize the h0 and c0 of lstm")
     parser.add_argument("--weight_decay", default=0.0, type=float,
                         help="Weight decay if we apply some.")
+    parser.add_argument("--train_bert_encoder", action='store_true',
+                        help="Whether to use outputs of bert to train another encoder")
+    parser.add_argument("--alpha_loss", default=0.5, type=float,
+                        help="final loss = caption loss + alpha_loss * reconstruct loss")
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
@@ -105,6 +110,15 @@ def main():
         encoder.fine_tune(args.fine_tune_encoder)
         encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, encoder.parameters()),
                                              lr=args.encoder_lr) if args.fine_tune_encoder else None
+        if args.train_bert_encoder:
+            bert_encoder = BertEncoder()
+            bert_encoder.fine_tune(args.fine_tune_encoder)
+            bert_encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, bert_encoder.parameters()),
+                                                 lr=args.encoder_lr)
+        else:
+            bert_encoder = None
+            bert_encoder_optimizer = None
+
 
     else:
         checkpoint = torch.load(args.checkpoint)
@@ -123,17 +137,23 @@ def main():
     # Move to GPU, if available
     decoder = decoder.to(args.device)
     encoder = encoder.to(args.device)
+    if args.train_bert_encoder:
+        bert_encoder = bert_encoder.to(args.device)
     bert_model = bert_model.to(args.device)
 
-    no_decay = ['bias', 'LayerNorm.weight']
-    optimizer_grouped_parameters = [
-        {'params': [p for n, p in bert_model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
-        {'params': [p for n, p in bert_model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
-        ]
-    bert_optimizer = AdamW(optimizer_grouped_parameters, lr=args.bert_lr, eps=1e-8)
+    if not args.train_bert_encoder:
+        no_decay = ['bias', 'LayerNorm.weight']
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in bert_model.named_parameters() if not any(nd in n for nd in no_decay)], 'weight_decay': args.weight_decay},
+            {'params': [p for n, p in bert_model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+            ]
+        bert_optimizer = AdamW(optimizer_grouped_parameters, lr=args.bert_lr, eps=1e-8)
+    else:
+        bert_optimizer = None
 
     # Loss function
-    criterion = nn.CrossEntropyLoss(ignore_index=0).to(args.device)
+    criterion_caption = nn.CrossEntropyLoss(ignore_index=0).to(args.device)
+    criterion_bert = nn.MSELoss().to(args.device)
 
     # Custom dataloaders
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -157,14 +177,19 @@ def main():
             adjust_learning_rate(decoder_optimizer, 0.8)
             if args.fine_tune_encoder:
                 adjust_learning_rate(encoder_optimizer, 0.8)
+                if args.train_bert_encoder:
+                    adjust_learning_rate(bert_encoder_optimizer, 0.8)
 
         # One epoch's training
         train(train_loader=train_loader,
               encoder=encoder,
-              bert_encoder=bert_model,
+              bert_encoder=bert_encoder,
+              bert=bert_model,
               decoder=decoder,
-              criterion=criterion,
+              criterion_caption=criterion_caption,
+              criterion_bert=criterion_bert,
               encoder_optimizer=encoder_optimizer,
+              bert_encoder_optimizer=bert_encoder_optimizer,
               decoder_optimizer=decoder_optimizer,
               bert_optimizer=bert_optimizer,
               epoch=epoch,
@@ -173,9 +198,9 @@ def main():
         # One epoch's validation
         recent_bleu4 = validate(val_loader=val_loader,
                                 encoder=encoder,
-                                bert_encoder=bert_model,
+                                bert_encoder=bert_encoder if args.train_bert_encoder else bert_model,
                                 decoder=decoder,
-                                criterion=criterion,
+                                criterion=criterion_caption,
                                 word_map=word_map,
                                 args=args)
 
@@ -194,7 +219,8 @@ def main():
                             decoder_optimizer, bert_optimizer, recent_bleu4)
 
 
-def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, bert_optimizer, epoch, args):
+def train(train_loader, encoder, bert_encoder, bert, decoder, criterion_caption, criterion_bert, encoder_optimizer, bert_encoder_optimizer,
+          decoder_optimizer, bert_optimizer, epoch, args):
     """
     Performs one epoch's training.
 
@@ -209,11 +235,18 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
 
     decoder.train()  # train mode (dropout and batchnorm is used)
     encoder.train()
-    bert_encoder.train()
+    if args.train_bert_encoder:
+        bert.eval()
+        bert_encoder.train()
+    else:
+        bert.train()
+
 
     decoder.zero_grad()
     encoder.zero_grad()
-    bert_encoder.zero_grad()
+    bert.zero_grad()
+    if args.train_bert_encoder:
+        bert_encoder.zero_grad()
 
     batch_time = AverageMeter()  # forward prop. + back prop. time
     data_time = AverageMeter()  # data loading time
@@ -237,9 +270,19 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
         attention_mask = (torch.arange(len(caps_bert[0]))[None, :] < caplens_bert[:, None]).squeeze(1).float().to(args.device)
 
         # Forward prop.
-        bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)[1]
-        imgs = encoder(imgs)
-        scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs, bert_output, caps, caplens)
+
+        print(imgs.size())
+        imgs_feature = encoder(imgs)
+        if args.train_bert_encoder:
+            with torch.no_grad():
+                bert_output = bert(caps_bert, attention_mask=attention_mask)[1]
+            print(imgs.size())
+            bert_encoder_output = bert_encoder(imgs)
+            scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs_feature, bert_encoder_output, caps, caplens)
+        else:
+            bert_output = bert(caps_bert, attention_mask=attention_mask)[1]
+            scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs_feature, bert_output, caps, caplens)
+
 
         # Since we decoded starting with <start>, the targets are all words after <start>, up to <end>
         targets = caps_sorted[:, 1:]
@@ -247,7 +290,9 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
         targets = targets.contiguous()
 
         # Calculate loss
-        loss = criterion(scores.view(-1,scores.size(-1)), targets.view(-1))
+        loss = criterion_caption(scores.view(-1,scores.size(-1)), targets.view(-1))
+        if args.train_bert_encoder:
+            loss += args.alpha_loss * criterion_bert(bert_output, bert_encoder_output)
 
         # Add doubly stochastic attention regularization
         loss += args.alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()
@@ -260,17 +305,23 @@ def train(train_loader, encoder, bert_encoder, decoder, criterion, encoder_optim
             clip_gradient(decoder_optimizer, args.grad_clip)
             if encoder_optimizer is not None:
                 clip_gradient(encoder_optimizer, args.grad_clip)
+            if bert_encoder_optimizer is not None:
+                clip_gradient(bert_encoder_optimizer, args.grad_clip)
             if bert_optimizer is not None:
                 clip_gradient(bert_optimizer, args.grad_clip)
 
         # Update weights
         decoder_optimizer.step()
         encoder_optimizer.step()
-        bert_optimizer.step()
-
         decoder_optimizer.zero_grad()
         encoder_optimizer.zero_grad()
-        bert_optimizer.zero_grad()
+
+        if args.train_bert_encoder:
+            bert_encoder_optimizer.step()
+            bert_encoder_optimizer.zero_grad()
+        else:
+            bert_optimizer.step()
+            bert_optimizer.zero_grad()
 
         # Keep track of metrics
         top5 = accuracy(scores, targets, 5)
