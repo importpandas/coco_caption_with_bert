@@ -251,8 +251,8 @@ def clip_gradient(optimizer, grad_clip):
                 param.grad.data.clamp_(-grad_clip, grad_clip)
 
 
-def save_checkpoint(data_name, output_dir,epoch, epochs_since_improvement, encoder, decoder, bert_encoder, encoder_optimizer, decoder_optimizer,
-                    bert_optimizer, bleu4):
+def save_checkpoint(data_name, output_dir,epoch, epochs_since_improvement, encoder, bert_encoder, decoder, bert, encoder_optimizer, decoder_optimizer,
+                    bert_optimizer, bleu4, args):
     """
     Saves model checkpoint.
 
@@ -270,6 +270,7 @@ def save_checkpoint(data_name, output_dir,epoch, epochs_since_improvement, encod
              'epochs_since_improvement': epochs_since_improvement,
              'bleu-4': bleu4,
              'encoder': encoder,
+             'bert_encoder': bert_encoder,
              'decoder': decoder,
              'encoder_optimizer': encoder_optimizer,
              'decoder_optimizer': decoder_optimizer,
@@ -282,8 +283,9 @@ def save_checkpoint(data_name, output_dir,epoch, epochs_since_improvement, encod
     saved_path = os.path.join(output_dir, filename)
     torch.save(state, saved_path)
 
-    model_to_save = bert_encoder.module if hasattr(bert_encoder, 'module') else bert_encoder  # Take care of distributed/parallel training
-    model_to_save.save_pretrained(output_dir)
+    if not args.train_bert_encoder:
+        model_to_save = bert.module if hasattr(bert, 'module') else bert  # Take care of distributed/parallel training
+        model_to_save.save_pretrained(output_dir)
 
 
 class AverageMeter(object):

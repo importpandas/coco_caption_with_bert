@@ -15,7 +15,7 @@ from nltk.translate.bleu_score import corpus_bleu
 import argparse
 from transformers import WEIGHTS_NAME, BertConfig,BertModel, BertTokenizer, AdamW
 import os
-#os.environ['TORCH_HOME'] = "/mnt/lustre/sjtu/home/hsx66/.torch/models"
+os.environ['TORCH_HOME'] = "/mnt/lustre/sjtu/home/hsx66/.torch/models"
 
 cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
 
@@ -52,6 +52,7 @@ def main():
                         help="num of workers for data-loading")
     parser.add_argument("--bert_lr", default=5e-5, type=float)
     parser.add_argument("--encoder_lr", default=1e-4, type=float)
+    parser.add_argument("--bert_encoder_lr", default=5e-4, type=float)
     parser.add_argument("--decoder_lr", default=5e-4, type=float)
     parser.add_argument("--grad_clip", default=5, type=float,
                         help="clip gradients at an absolute value of")
@@ -114,7 +115,7 @@ def main():
             bert_encoder = BertEncoder()
             bert_encoder.fine_tune(args.fine_tune_encoder)
             bert_encoder_optimizer = torch.optim.Adam(params=filter(lambda p: p.requires_grad, bert_encoder.parameters()),
-                                                 lr=args.encoder_lr)
+                                                 lr=args.bert_encoder_lr)
         else:
             bert_encoder = None
             bert_encoder_optimizer = None
@@ -166,6 +167,14 @@ def main():
         CaptionDataset(args.data_folder, args.data_name, 'VAL', transform=transforms.Compose([normalize])),
         batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True)
     print(f'val dataset length {len(val_loader)}')
+    recent_bleu4 = validate(val_loader=val_loader,
+                                encoder=encoder,
+                                bert_encoder=bert_encoder if args.train_bert_encoder else bert_model,
+                                decoder=decoder,
+                                criterion=criterion_caption,
+                                word_map=word_map,
+                                args=args)
+
 
     # Epochs
     for epoch in range(args.start_epoch, args.epochs):
@@ -215,8 +224,8 @@ def main():
 
         # Save checkpoint
         if is_best:
-            save_checkpoint(args.data_name, args.output_dir,epoch, epochs_since_improvement, encoder, decoder, bert_model, encoder_optimizer,
-                            decoder_optimizer, bert_optimizer, recent_bleu4)
+            save_checkpoint(args.data_name, args.output_dir,epoch, epochs_since_improvement, encoder, bert_encoder, decoder, bert_model, encoder_optimizer,
+                            decoder_optimizer, bert_optimizer, recent_bleu4, args)
 
 
 def train(train_loader, encoder, bert_encoder, bert, decoder, criterion_caption, criterion_bert, encoder_optimizer, bert_encoder_optimizer,
@@ -271,12 +280,10 @@ def train(train_loader, encoder, bert_encoder, bert, decoder, criterion_caption,
 
         # Forward prop.
 
-        print(imgs.size())
         imgs_feature = encoder(imgs)
         if args.train_bert_encoder:
             with torch.no_grad():
                 bert_output = bert(caps_bert, attention_mask=attention_mask)[1]
-            print(imgs.size())
             bert_encoder_output = bert_encoder(imgs)
             scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs_feature, bert_encoder_output, caps, caplens)
         else:
@@ -387,7 +394,10 @@ def validate(val_loader, encoder, bert_encoder, decoder, criterion, word_map,arg
             attention_mask = (torch.arange(len(caps_bert[0]))[None, :] < caplens_bert[:, None]).squeeze(1).float().to(args.device)
 
             # Forward prop.
-            bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)[1]
+            if args.train_bert_encoder:
+                bert_output = bert_encoder(imgs)
+            else:
+                bert_output = bert_encoder(caps_bert, attention_mask=attention_mask)[1]
             imgs = encoder(imgs)
 
             scores, caps_sorted, decode_lengths, alphas, sort_ind = decoder(imgs,bert_output, caps, caplens)

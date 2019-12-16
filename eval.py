@@ -36,6 +36,9 @@ def evaluate():
     encoder = checkpoint['encoder']
     encoder = encoder.to(device)
     encoder.eval()
+    bert_encoder = checkpoint['bert_encoder']
+    bert_encoder = bert_encoder.to(device)
+    bert_encoder.eval()
 
     # Load word map (word2ix)
     with open(args.word_map_file, 'r') as j:
@@ -63,7 +66,7 @@ def evaluate():
     hypotheses = list()
 
     # For each image
-    for i, (image, caps, caplens, allcaps) in enumerate(
+    for i, (image, caps, caplens, _, _, allcaps) in enumerate(
             tqdm(loader, desc="EVALUATING AT BEAM SIZE " + str(args.beam_size))):
 
         k = args.beam_size
@@ -72,13 +75,16 @@ def evaluate():
         image = image.to(device)  # (1, 3, 256, 256)
 
         # Encode
-        encoder_out = encoder(image)  # (1, enc_image_size, enc_image_size, encoder_dim)
+        bert_encoder_out = bert_encoder(image)
+        encoder_out = encoder(image)  # a(1, enc_image_size, enc_image_size, encoder_dim)
         enc_image_size = encoder_out.size(1)
         encoder_dim = encoder_out.size(3)
 
         # Flatten encoding
         encoder_out = encoder_out.view(1, -1, encoder_dim)  # (1, num_pixels, encoder_dim)
         num_pixels = encoder_out.size(1)
+
+        bert_encoder_out = bert_encoder_out.expand(k, bert_encoder_out.size(-1))
 
         # We'll treat the problem as having a batch size of k
         encoder_out = encoder_out.expand(k, num_pixels, encoder_dim)  # (k, num_pixels, encoder_dim)
@@ -98,7 +104,7 @@ def evaluate():
 
         # Start decoding
         step = 1
-        h, c = decoder.init_hidden_state(encoder_out)
+        h, c = decoder.init_hidden_state(encoder_out, bert_encoder_out)
 
         # s is a number less than or equal to k, because sequences are removed from this process once they hit <end>
         while True:
@@ -110,7 +116,7 @@ def evaluate():
             gate = decoder.sigmoid(decoder.f_beta(h))  # gating scalar, (s, encoder_dim)
             awe = gate * awe
 
-            h, c = decoder.decode_step(torch.cat([embeddings, awe], dim=1), (h, c))  # (s, decoder_dim)
+            h, c = decoder.decode_step(torch.cat([embeddings, awe, bert_encoder_out], dim=1), (h, c))  # (s, decoder_dim)
 
             scores = decoder.fc(h)  # (s, vocab_size)
             scores = F.log_softmax(scores, dim=1)
@@ -150,6 +156,7 @@ def evaluate():
             h = h[prev_word_inds[incomplete_inds]]
             c = c[prev_word_inds[incomplete_inds]]
             encoder_out = encoder_out[prev_word_inds[incomplete_inds]]
+            bert_encoder_out = bert_encoder_out[prev_word_inds[incomplete_inds]]           
             top_k_scores = top_k_scores[incomplete_inds].unsqueeze(1)
             k_prev_words = next_word_inds[incomplete_inds].unsqueeze(1)
 
