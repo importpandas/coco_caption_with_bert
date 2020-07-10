@@ -7,6 +7,7 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 from torch import nn
+import torch.nn.functional as F
 from torch.nn.utils.rnn import pack_padded_sequence
 from models import Encoder, BertEncoder, ModifiedDecoderWithAttention
 from datasets import *
@@ -74,7 +75,14 @@ def main():
                         help="Whether to use outputs of bert to train another encoder")
     parser.add_argument("--alpha_loss", default=0.5, type=float,
                         help="final loss = caption loss + alpha_loss * reconstruct loss")
+    parser.add_argument("--loss_func", default="mse", type=str,
+                        help="loss function of measuring reconstruction loss")
     args = parser.parse_args()
+
+    print("arguments:")
+    for arg in vars(args):
+        print(f'{arg}: {getattr(args, arg)}')
+    print("\n\n")
 
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
@@ -154,7 +162,10 @@ def main():
 
     # Loss function
     criterion_caption = nn.CrossEntropyLoss(ignore_index=0).to(args.device)
-    criterion_bert = nn.MSELoss().to(args.device)
+    if args.loss_func == "mse":
+        criterion_bert = nn.MSELoss().to(args.device)
+    else:
+        criterion_bert = nn.KLDivLoss().to(args.device)
 
     # Custom dataloaders
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -299,7 +310,14 @@ def train(train_loader, encoder, bert_encoder, bert, decoder, criterion_caption,
         # Calculate loss
         loss = criterion_caption(scores.view(-1,scores.size(-1)), targets.view(-1))
         if args.train_bert_encoder:
-            loss += args.alpha_loss * criterion_bert(bert_output, bert_encoder_output)
+            if args.loss_func == 'mse':
+                recons_loss = criterion_bert(bert_encoder_output, bert_output)
+            else:
+                bert_encoder_soft_output = F.log_softmax(bert_encoder_output)
+                bert_soft_output = F.softmax(bert_output)
+                recons_loss = criterion_bert(bert_encoder_soft_output, bert_soft_output)
+
+            loss += args.alpha_loss * recons_loss
 
         # Add doubly stochastic attention regularization
         loss += args.alpha_c * ((1. - alphas.sum(dim=1)) ** 2).mean()

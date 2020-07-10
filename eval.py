@@ -25,6 +25,12 @@ def evaluate():
                         help="beam size at which to generate captions for evaluation")
     args = parser.parse_args()
 
+    print("arguments:")
+
+    for arg in vars(args):
+        print(f'{arg}: {getattr(args, arg)}')
+    print("\n\n")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # sets device for model and PyTorch tensors
     cudnn.benchmark = True  # set to true only if inputs to model are fixed size; otherwise lot of computational overhead
 
